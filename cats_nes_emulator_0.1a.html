@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cat's NES Emulator</title>
+<style>
+:root{color-scheme:dark;--bg:#080b12;--panel:#111827;--line:#273449;--cyan:#58d7ff;--green:#a7f36b;--muted:#9aabc0}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(ellipse at top,#14243a 0,#080b12 58%);color:#edf6ff;font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;display:grid;place-items:center;padding:22px}
+main{width:min(1000px,100%)}header{text-align:center;margin-bottom:18px}h1{font-size:clamp(26px,5vw,42px);margin:0;letter-spacing:.04em}h1 span{color:var(--cyan)}header p{margin:6px 0;color:var(--muted)}
+.layout{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(245px,.8fr);gap:16px}.panel{background:linear-gradient(145deg,#131d2c,#0d1420);border:1px solid var(--line);border-radius:16px;padding:16px;box-shadow:0 16px 45px #0006}
+.screen-wrap{background:#020704;border:1px solid #31452e;border-radius:10px;padding:12px;box-shadow:inset 0 0 24px #000}canvas{display:block;width:100%;height:auto;image-rendering:pixelated;aspect-ratio:256/240;background:#050a06;border-radius:4px}
+.status{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;color:var(--muted);font-size:13px;margin-top:10px}.controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+button,.file-label{border:1px solid #34465e;background:#1a2a3e;color:#eff8ff;border-radius:9px;padding:9px 13px;font:inherit;cursor:pointer}
+button:hover,.file-label:hover{border-color:var(--cyan);background:#203851}button.primary{background:#087ca2;border-color:#139bc7}button:disabled{opacity:.45;cursor:not-allowed}
+input[type=file]{display:none}.side h2{font-size:16px;margin:0 0 10px}.side p{color:var(--muted);margin:8px 0}.hint{font-size:12px;color:var(--muted)}.footer{text-align:center;color:#74869d;font-size:12px;margin-top:14px}
+kbd{background:#0b121d;border:1px solid #2b3c52;border-radius:5px;padding:2px 6px;color:var(--green)}
+@media(max-width:700px){.layout{grid-template-columns:1fr}.side{order:2}}
+</style></head>
+<body><main>
+<header><h1>CAT'S <span>NES</span></h1><p>8-bit Nintendo Entertainment System · NROM homebrew player</p></header>
+<div class="layout">
+<section class="panel">
+<div class="screen-wrap"><canvas id="screen" width="256" height="240" aria-label="NES display"></canvas></div>
+<div class="status"><span id="state">READY · Load a .nes ROM</span><span id="info">CPU: —</span></div>
+<div class="controls">
+<label class="file-label" for="rom">Load .NES ROM</label><input id="rom" type="file" accept=".nes,application/octet-stream">
+<button class="primary" id="start">Start / Resume</button><button id="pause">Pause</button><button id="reset">Reset</button>
+</div>
+<p class="hint">Supports iNES NROM mapper 0 (16/32 KB PRG, 8 KB CHR ROM or CHR RAM). Other mappers are not supported yet.</p>
+</section>
+<aside class="panel side">
+<h2>Controller 1</h2><p><kbd>Z</kbd> A · <kbd>X</kbd> B · <kbd>Enter</kbd> Start · <kbd>Shift</kbd> Select</p>
+<p><kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> D-pad</p>
+<h2 style="margin-top:18px">Controller 2</h2><p><kbd>G</kbd> A · <kbd>H</kbd> B · <kbd>T</kbd> Start · <kbd>Y</kbd> Select</p>
+<p><kbd>W</kbd> <kbd>S</kbd> <kbd>A</kbd> <kbd>D</kbd> D-pad</p>
+<h2 style="margin-top:18px">Compatibility</h2><p>6502 CPU core · PPU background and sprites · controller ports · OAM DMA · NMI/vblank · palette RAM</p>
+<p class="hint">Audio/APU and advanced mappers are not implemented in this build.</p>
+</aside></div>
+<div class="footer">Cat's NES · HTML5 + JavaScript · © AC Kondo 1999–2026</div>
+</main>
+<script>
+(()=>{'use strict';
+const $=id=>document.getElementById(id),canvas=$('screen'),ctx=canvas.getContext('2d'),state=$('state'),info=$('info');
+const image=ctx.createImageData(256,240);
+const COLORS=[0x626262,0x001fb2,0x2404c8,0x5200b2,0x730076,0x800024,0x730b00,0x522800,0x244400,0x005700,0x005c00,0x005324,0x003c76,0,0,0,
+0xababab,0x0d57ff,0x4b30ff,0x8a13ff,0xbc08d6,0xd21269,0xc72e00,0x9d5400,0x5f7b00,0x209800,0x00a300,0x009942,0x007db8,0,0,0,
+0xffffff,0x53aeff,0x9085ff,0xd46fff,0xff65ff,0xff6dba,0xff8b57,0xffad29,0xc9d930,0x8bf13a,0x48f58c,0x2ce5d0,0x3cc5ff,0x4e4e4e,0,0,
+0xffffff,0xb6e1ff,0xceceff,0xe9c6ff,0xffc5ff,0xffc8e8,0xffd2c0,0xffdfaa,0xe8edaa,0xd0f5b5,0xbdf5d0,0xb7f1eb,0xbde8ff,0,0,0];
+let cart=null,cpu=null,ppu=null,keys=[0,0],running=false,raf=0,last=0,acc=0,frameNo=0;
+const keyBits={ArrowUp:4,ArrowDown:5,ArrowLeft:6,ArrowRight:7,z:0,x:1,Shift:2,Enter:3,w:4,s:5,a:6,d:7,g:0,h:1,y:2,t:3};
+function setState(s){state.textContent=s}
+function render(){
+ if(!ppu)return;
+ const nt=ppu.mem,chr=cart.chr,prg=cart.prg;
+ const pal=ppu.palette;
+ const bgTable=(ppu.ctrl>>4)&1, sprTable=(ppu.ctrl>>3)&1, spr16=ppu.ctrl&0x20;
+ const scrollX=ppu.scrollX,scrollY=ppu.scrollY;
+ function colorAt(index){let c=pal[index&31]&63;if((ppu.mask&1))c&=0x30;return COLORS[c]||0}
+ for(let y=0;y<240;y++)for(let x=0;x<256;x++){
+   let sx=(x+scrollX)&255,sy=(y+scrollY)%480,ntIndex=(sy>=240?0x400:0)+(Math.floor(sy/8)*32)+Math.floor(sx/8);
+   let tile=nt[ntIndex&0x7ff]||0,attr=nt[0x3c0+((Math.floor(sy/32)*8)+(Math.floor(sx/32)))+(sy>=240?0x400:0)]||0;
+   let shift=((Math.floor((sy&31)/16)*2)+Math.floor((sx&31)/16))*2, palNum=(attr>>shift)&3;
+   let row=sy&7,col=sx&7,base=(bgTable*0x1000)+tile*16+row;
+   let lo=ppuReadPattern(base),hi=ppuReadPattern(base+8);
+   let bit=7-col,pix=((lo>>bit)&1)|(((hi>>bit)&1)<<1);
+   let ci=pix===0?0:(palNum*4+pix);
+   let rgb=colorAt(ci),o=(y*256+x)*4;
+   image.data[o]=(rgb>>16)&255;image.data[o+1]=(rgb>>8)&255;image.data[o+2]=rgb&255;image.data[o+3]=255;
+ }
+ // Sprites (8x8 and 8x16)
+ for(let i=0;i<64;i++){
+   let y0=ppu.oam[i*4],tile=ppu.oam[i*4+1],attr=ppu.oam[i*4+2],x0=ppu.oam[i*4+3];
+   if(y0>=0xef)continue;
+   let h=spr16?16:8,table=spr16?(tile&1)*0x1000:sprTable*0x1000,base=spr16?((tile&0xfe)*16):tile*16;
+   for(let sy=0;sy<h;sy++)for(let sx=0;sx<8;sx++){
+     let rr=(attr&0x80)?h-1-sy:sy,cc=(attr&0x40)?7-sx:sx;
+     let tbase=spr16?table+base+(rr>=8?16:0)+(rr&7):table+base+rr;
+     let pix=((ppuReadPattern(tbase)>>(7-cc))&1)|(((ppuReadPattern(tbase+8)>>(7-cc))&1)<<1);
+     if(!pix)continue;
+     let xx=x0+sx,yy=y0+1+sy;if(xx>=256||yy>=240)continue;
+     let ci=0x10+((attr&3)*4)+pix,rgb=colorAt(ci),o=(yy*256+xx)*4;
+     image.data[o]=(rgb>>16)&255;image.data[o+1]=(rgb>>8)&255;image.data[o+2]=rgb&255;image.data[o+3]=255;
+   }
+ }
+ ctx.putImageData(image,0,0);
+}
+function ppuReadPattern(a){if(cart.chr.length)return cart.chr[a&0x1fff];return ppu.chrRam[a&0x1fff]}
+function ppuWriteAddr(v){if(!ppu.w){ppu.addr=((v&0x3f)<<8)|(ppu.addr&255);ppu.w=1}else{ppu.addr=(ppu.addr&0x3f00)|v;ppu.w=0;ppu.v=ppu.addr}}
+function ntIndex(a){a=(a-0x2000)&0x0fff;let table=(a>>10)&3,off=a&0x3ff;if(cart.mirror===0)table&=1;else if(cart.mirror===1)table>>=1;return table*0x400+off}
+function ppuRead(a){a&=0x3fff;if(a<0x2000)return ppuReadPattern(a);if(a<0x3f00)return ppu.nt[ntIndex(a)];return ppu.palette[(a-0x3f00)&31]}
+function ppuWrite(a,v){a&=0x3fff;if(a<0x2000){if(!cart.chr.length)ppu.chrRam[a]=v}else if(a<0x3f00)ppu.nt[ntIndex(a)]=v;else{let i=(a-0x3f00)&31;if((i&0x13)===0x10)i-=0x10;ppu.palette[i]=v&63}}
+function makePPU(){return{mem:new Uint8Array(0x800),nt:new Uint8Array(0x800),palette:new Uint8Array(32),oam:new Uint8Array(256).fill(0xff),chrRam:new Uint8Array(8192),ctrl:0,mask:0,status:0,oamAddr:0,addr:0,v:0,w:0,scrollX:0,scrollY:0,scrollLatch:0,readBuffer:0,frame:0}}
+function makeCPU(){
+ return {ram:new Uint8Array(2048),a:0,x:0,y:0,s:0xfd,p:0x24,pc:0,cycles:0,stopped:false};
+}
+function cpuRead(a){
+ a&=0xffff;if(a<0x2000)return cpu.ram[a&0x7ff];
+ if(a<0x4000){let r=0x2000|(a&7);if(r===0x2002){let v=ppu.status;ppu.status&=0x7f;ppu.w=0;return v}
+ if(r===0x2004)return ppu.oam[ppu.oamAddr];
+ if(r===0x2007){let v=ppuRead(ppu.v);if(ppu.v<0x3f00){let old=ppu.readBuffer;ppu.readBuffer=v;v=old}else ppu.readBuffer=ppuRead(ppu.v-0x1000);ppu.v=(ppu.v+((ppu.ctrl&4)?32:1))&0x7fff;return v}return 0}
+ if(a===0x4016||a===0x4017){let n=a&1,bit=keys[n]&1;if(!controllerStrobe){keys[n]=(keys[n]>>1)|0x80}return bit|0x40}
+ if(a>=0x8000){let i=a-0x8000;if(cart.prg.length===0x4000)i&=0x3fff;return cart.prg[i%cart.prg.length]}
+ return 0;
+}
+let controllerStrobe=0;
+function cpuWrite(a,v){
+ a&=0xffff;v&=255;if(a<0x2000){cpu.ram[a&0x7ff]=v;return}
+ if(a<0x4000){let r=0x2000|(a&7);if(r===0x2000)ppu.ctrl=v;else if(r===0x2001)ppu.mask=v;else if(r===0x2003)ppu.oamAddr=v;else if(r===0x2004){ppu.oam[ppu.oamAddr++]=v&255}else if(r===0x2005){if(!ppu.scrollLatch)ppu.scrollX=v;else ppu.scrollY=v;ppu.scrollLatch^=1}else if(r===0x2006)ppuWriteAddr(v);else if(r===0x2007){ppuWrite(ppu.v,v);ppu.v=(ppu.v+((ppu.ctrl&4)?32:1))&0x7fff}return}
+ if(a===0x4014){let base=v<<8;for(let i=0;i<256;i++)ppu.oam[(ppu.oamAddr+i)&255]=cpuRead(base+i);cpu.cycles+=513;return}
+ if(a===0x4016){controllerStrobe=v&1;if(controllerStrobe){keys[0]=keys[0];keys[1]=keys[1]}return}
+}
+function flags(v){cpu.p=(cpu.p&~0x82)|(v===0?2:0)|(v&0x80)}
+function push(v){cpuWrite(0x100+cpu.s,v);cpu.s=(cpu.s-1)&255}
+function pop(){cpu.s=(cpu.s+1)&255;return cpuRead(0x100+cpu.s)}
+function read16(a){return cpuRead(a)|(cpuRead((a+1)&0xffff)<<8)}
+function step(){
+ let op=cpuRead(cpu.pc++),c=cpuRead, w=cpuWrite, A=cpu.a, X=cpu.x, Y=cpu.y, P=cpu.p;
+ const zp=()=>cpuRead(cpu.pc++), abs=()=>{let l=cpuRead(cpu.pc++),h=cpuRead(cpu.pc++);return l|(h<<8)};
+ const imm=()=>cpuRead(cpu.pc++), setA=v=>{cpu.a=v&255;flags(cpu.a)}, setX=v=>{cpu.x=v&255;flags(cpu.x)}, setY=v=>{cpu.y=v&255;flags(cpu.y)};
+ const adc=v=>{let sum=cpu.a+v+(cpu.p&1);cpu.p=(cpu.p&~0x41)|(sum>255?1:0)|((~(cpu.a^v)&(cpu.a^sum)&128)?0x40:0);setA(sum)};
+ const cmp=(r,v)=>{let z=(r-v)&255;cpu.p=(cpu.p&~1)|(r>=v?1:0);flags(z)};
+ const branch=cond=>{let d=cpuRead(cpu.pc++);if(cond)cpu.pc=(cpu.pc+(d<128?d:d-256))&65535};
+ let cycles=2,addr,v;
+ switch(op){
+ case 0xEA:break;case 0x78:cpu.p|=4;break;case 0x58:cpu.p&=~4;break;case 0xD8:cpu.p&=~8;break;case 0x18:cpu.p&=~1;break;case 0x38:cpu.p|=1;break;
+ case 0xA9:setA(imm());break;case 0xA2:setX(imm());break;case 0xA0:setY(imm());break;
+ case 0xA5:setA(c(zp()));break;case 0xA6:setX(c(zp()));break;case 0xA4:setY(c(zp()));break;
+ case 0xAD:setA(c(abs()));break;case 0xAE:setX(c(abs()));break;case 0xAC:setY(c(abs()));break;
+ case 0xBD:addr=(abs()+cpu.x)&65535;setA(c(addr));break;case 0xB9:addr=(abs()+cpu.y)&65535;setA(c(addr));break;
+ case 0x85:w(zp(),cpu.a);break;case 0x86:w(zp(),cpu.x);break;case 0x84:w(zp(),cpu.y);break;
+ case 0x8D:w(abs(),cpu.a);break;case 0x8E:w(abs(),cpu.x);break;case 0x8C:w(abs(),cpu.y);break;
+ case 0x9A:cpu.s=cpu.x;break;case 0xBA:setX(cpu.s);break;
+ case 0xAA:setX(cpu.a);break;case 0x8A:setA(cpu.x);break;case 0xA8:setY(cpu.a);break;case 0x98:setA(cpu.y);break;
+ case 0xE8:setX(cpu.x+1);break;case 0xCA:setX(cpu.x-1);break;case 0xC8:setY(cpu.y+1);break;case 0x88:setY(cpu.y-1);break;
+ case 0xE6:addr=zp();v=(c(addr)+1)&255;w(addr,v);flags(v);break;case 0xC6:addr=zp();v=(c(addr)-1)&255;w(addr,v);flags(v);break;
+ case 0xEE:addr=abs();v=(c(addr)+1)&255;w(addr,v);flags(v);break;case 0xCE:addr=abs();v=(c(addr)-1)&255;w(addr,v);flags(v);break;
+ case 0x69:adc(imm());break;case 0x65:adc(c(zp()));break;case 0x6D:adc(c(abs()));break;
+ case 0xE9:case 0xEB:adc(imm()^255);break;
+ case 0x29:setA(cpu.a&imm());break;case 0x09:setA(cpu.a|imm());break;case 0x49:setA(cpu.a^imm());break;
+ case 0x25:setA(cpu.a&c(zp()));break;case 0x05:setA(cpu.a|c(zp()));break;case 0x45:setA(cpu.a^c(zp()));break;
+ case 0xC9:cmp(cpu.a,imm());break;case 0xE0:cmp(cpu.x,imm());break;case 0xC0:cmp(cpu.y,imm());break;
+ case 0xC5:cmp(cpu.a,c(zp()));break;case 0xCD:cmp(cpu.a,c(abs()));break;
+ case 0xF0:branch(!!(cpu.p&2));break;case 0xD0:branch(!(cpu.p&2));break;case 0x90:branch(!(cpu.p&1));break;case 0xB0:branch(!!(cpu.p&1));break;case 0x10:branch(!(cpu.p&128));break;case 0x30:branch(!!(cpu.p&128));break;case 0x50:branch(!(cpu.p&64));break;case 0x70:branch(!!(cpu.p&64));break;
+ case 0x4C:cpu.pc=abs();break;case 0x6C:addr=abs();cpu.pc=read16((addr&0xff00)|((addr+1)&255));break;
+ case 0x20:addr=abs();push((cpu.pc-1)>>8);push(cpu.pc-1);cpu.pc=addr;break;case 0x60:cpu.pc=((pop()|(pop()<<8))+1)&65535;break;case 0x40:cpu.p=(pop()&~0x10)|0x20;cpu.pc=pop()|(pop()<<8);break;
+ case 0x48:push(cpu.a);break;case 0x68:setA(pop());break;case 0x08:push(cpu.p|0x30);break;case 0x28:cpu.p=pop()&~0x10;break;
+ case 0x4A:cpu.p=(cpu.p&~1)|(cpu.a&1);setA(cpu.a>>1);break;case 0x0A:cpu.p=(cpu.p&~1)|(cpu.a>>7);setA(cpu.a<<1);break;
+ case 0x6A:v=cpu.a;cpu.p=(cpu.p&~1)|(v&1);setA((v>>1)|((cpu.p&1)<<7));break;
+ case 0x26:addr=zp();v=c(addr);w(addr,((v<<1)|(cpu.p&1))&255);cpu.p=(cpu.p&~1)|(v>>7);flags(c(addr));break;
+ case 0x66:addr=zp();v=c(addr);w(addr,(v>>1)|((cpu.p&1)<<7));cpu.p=(cpu.p&~1)|(v&1);flags(c(addr));break;
+ case 0x2A:v=cpu.a;cpu.p=(cpu.p&~1)|(v>>7);setA((v<<1)|(cpu.p&1));break;
+ case 0x0B:case 0x2B:setA(cpu.a&imm());cpu.p=(cpu.p&~0x80)|(cpu.a&0x80);break;
+ case 0x00:cpu.pc++;push(cpu.pc>>8);push(cpu.pc);push(cpu.p|0x30);cpu.p|=4;cpu.pc=read16(0xfffe);break;
+ default:throw Error('Unsupported 6502 opcode $'+op.toString(16).padStart(2,'0')+' at $'+(cpu.pc-1).toString(16));
+ }
+ cpu.cycles+=cycles;
+}
+function loadROM(buf){
+ const b=new Uint8Array(buf);if(b.length<16||b[0]!==0x4e||b[1]!==0x45||b[2]!==0x53||b[3]!==0x1a)throw Error('Invalid iNES header');
+ const flags6=b[6],flags7=b[7],mapper=(flags6>>4)|(flags7&0xf0);if(mapper!==0)throw Error('Mapper '+mapper+' unsupported (NROM mapper 0 only)');
+ if(flags6&4)throw Error('Trainer ROMs are not supported yet');
+ const pcnt=b[4],ccnt=b[5],start=16,plen=pcnt*16384,clen=ccnt*8192;if(!plen||plen>32768||b.length<start+plen+clen)throw Error('Invalid or truncated PRG/CHR data');
+ const prg=b.slice(start,start+plen),chr=ccnt?b.slice(start+plen,start+plen+clen):new Uint8Array(0);
+ cart={prg,chr,mirror:flags6&1};ppu=makePPU();cpu=makeCPU();cpu.pc=read16(0xfffc);cpu.cycles=7;
+ if(!chr.length)ppu.chrRam.fill(0);
+ render();setState('LOADED · '+(pcnt*16)+' KB PRG · '+(ccnt?ccnt*8+' KB CHR':'CHR RAM'));info.textContent='NROM · PC $'+cpu.pc.toString(16).toUpperCase();
+}
+function frame(){
+ if(!running)return;
+ try{
+   // Execute a frame's worth of NTSC CPU work. Vblank is raised once per frame.
+   let target=cpu.cycles+29780,guard=0;
+   while(cpu.cycles<target&&guard++<50000)step();
+   ppu.status|=0x80;
+   if(ppu.ctrl&0x80){push((cpu.pc>>8)&255);push(cpu.pc&255);push((cpu.p&~0x10)|0x20);cpu.p|=4;cpu.pc=read16(0xfffa);for(let i=0;i<7;i++)cpu.cycles++;}
+   render();frameNo++;info.textContent='NROM · PC $'+cpu.pc.toString(16).toUpperCase()+' · '+frameNo+' frames';
+   ppu.status&=~0x80;
+ }catch(e){running=false;setState('CPU STOPPED · '+e.message);return}
+ raf=requestAnimationFrame(frame);
+}
+function start(){if(!cart){setState('LOAD A .NES ROM FIRST');return}if(!running){running=true;setState('RUNNING · NTSC 60 FPS TARGET');raf=requestAnimationFrame(frame)}}
+function pause(){running=false;if(raf)cancelAnimationFrame(raf);setState(cart?'PAUSED':'READY · Load a .nes ROM')}
+function reset(){if(!cart)return;pause();let old={...cart};cart=old;ppu=makePPU();cpu=makeCPU();cpu.pc=read16(0xfffc);cpu.cycles=7;keys=[0,0];frameNo=0;render();setState('RESET · READY')}
+$('rom').addEventListener('change',async e=>{let f=e.target.files[0];if(!f)return;pause();try{loadROM(await f.arrayBuffer())}catch(err){setState('LOAD ERROR · '+err.message)}});
+$('start').onclick=start;$('pause').onclick=pause;$('reset').onclick=reset;
+window.addEventListener('keydown',e=>{let k=keyBits[e.key]??keyBits[e.key.toLowerCase()];if(k===undefined)return;e.preventDefault();let port='wsadghty'.includes(e.key.toLowerCase())?1:0;keys[port]|=1<<k});
+window.addEventListener('keyup',e=>{let k=keyBits[e.key]??keyBits[e.key.toLowerCase()];if(k===undefined)return;e.preventDefault();let port='wsadghty'.includes(e.key.toLowerCase())?1:0;keys[port]&=~(1<<k)});
+window.addEventListener('blur',()=>keys=[0,0]);
+render();setState('READY · Load a .nes ROM');
+})();
+</script></body></html>
